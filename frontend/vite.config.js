@@ -7,6 +7,9 @@ import react from '@vitejs/plugin-react'
 // you can use relative URLs from the React app.
 export default defineConfig({
   plugins: [react()],
+  preview: {
+    allowedHosts: ["student-management-system-34h1.onrender.com"],
+  },
   server: {
     port: 5173,
     proxy: {
