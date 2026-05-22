@@ -8,8 +8,11 @@ import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,7 +33,20 @@ public class StudentService {
     @Autowired
     private ActivityService activityService;
 
+    // Real college data is bundled as a classpath resource (backend/src/main/resources/cgpa_data.csv)
+    // so it ships with the deploy. The hard-coded file path below is kept only as a local-dev
+    // convenience: if you run the backend on the original Windows machine, it'll still find it.
+    private static final String CSV_RESOURCE = "/cgpa_data.csv";
     private final String CSV_PATH = "D:\\tmp\\cgpa_data.csv";
+
+    /** Returns an open InputStream for the dataset, preferring the bundled classpath resource. */
+    private InputStream openCsvStream() throws IOException {
+        InputStream in = getClass().getResourceAsStream(CSV_RESOURCE);
+        if (in != null) return in;
+        File f = new File(CSV_PATH);
+        if (f.exists()) return new FileInputStream(f);
+        return null;
+    }
 
     private final Map<String, Student> fallbackStore = new ConcurrentHashMap<>();
     private volatile boolean mongoHealthy = true;
@@ -56,13 +72,28 @@ public class StudentService {
     @PostConstruct
     public void init() {
         // Probe Mongo. If not reachable, seed the in-memory store with synthetic data.
+        // On a fresh/empty Mongo database, prefer importing the real CSV dataset
+        // (bundled at /cgpa_data.csv) over the 28-row synthetic seed.
         try {
             if (repository != null) {
                 long count = repository.count();
                 mongoHealthy = true;
                 if (count == 0) {
-                    seedFallback();
-                    fallbackStore.values().forEach(this::saveToMongoQuiet);
+                    boolean haveDataset;
+                    try (InputStream probe = openCsvStream()) { haveDataset = probe != null; }
+                    catch (IOException e) { haveDataset = false; }
+
+                    if (haveDataset) {
+                        try { importFromCsv(); }
+                        catch (Exception e) {
+                            // Fall back to synthetic if the CSV is malformed
+                            seedFallback();
+                            fallbackStore.values().forEach(this::saveToMongoQuiet);
+                        }
+                    } else {
+                        seedFallback();
+                        fallbackStore.values().forEach(this::saveToMongoQuiet);
+                    }
                 }
             } else {
                 mongoHealthy = false;
@@ -125,8 +156,11 @@ public class StudentService {
     }
 
     public void importDepartmentData() {
-        File csv = new File(CSV_PATH);
-        if (csv.exists()) {
+        boolean haveDataset;
+        try (InputStream probe = openCsvStream()) { haveDataset = probe != null; }
+        catch (IOException e) { haveDataset = false; }
+
+        if (haveDataset) {
             importFromCsv();
         } else {
             // No CSV? Reseed synthetic data so the system is always usable.
@@ -149,7 +183,16 @@ public class StudentService {
         }
         fallbackStore.clear();
 
-        try (BufferedReader br = new BufferedReader(new FileReader(CSV_PATH))) {
+        InputStream csvStream;
+        try { csvStream = openCsvStream(); }
+        catch (IOException e) {
+            throw new RuntimeException("Unable to open student dataset: " + e.getMessage());
+        }
+        if (csvStream == null) {
+            throw new RuntimeException("Local student dataset not found (neither classpath resource " + CSV_RESOURCE + " nor file " + CSV_PATH + ")");
+        }
+
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(csvStream, StandardCharsets.UTF_8))) {
             String line;
             int lineNumber = 0;
             while ((line = br.readLine()) != null) {
@@ -205,7 +248,7 @@ public class StudentService {
                 save(s, "system");
             }
         } catch (IOException e) {
-            throw new RuntimeException("Local student dataset not found at " + CSV_PATH);
+            throw new RuntimeException("Failed to read student dataset: " + e.getMessage());
         }
     }
 
